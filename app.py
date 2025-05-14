@@ -26,7 +26,7 @@ class TransformerClassifier(nn.Module):
         x = x.mean(dim=1)  # Global average pool
         return self.classifier(x)
 
-from timesformer_pytorch import TimeSformer
+
 
 @st.cache_resource
 def load_trained_model():
