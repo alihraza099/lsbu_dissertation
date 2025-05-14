@@ -2,11 +2,14 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ main ]  # or your default branch
+    branches: [ main ]
+    paths:
+      - 'app.py'
+      - 'requirements.txt'
+      - 'Dockerfile'
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -28,4 +31,4 @@ jobs:
         context: .
         file: ./Dockerfile
         push: true
-        tags: yourdockerhubusername/violence-detector:latest
+        tags: alihraza/violence-detector:latest
