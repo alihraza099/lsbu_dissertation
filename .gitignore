@@ -1,6 +1,16 @@
 venv/
 .venv/
 
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# MLflow
+mlruns/
+*.db
+
 # Model weights (large binaries)
 *.pth
 *.h5
