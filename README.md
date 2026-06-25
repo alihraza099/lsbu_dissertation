@@ -26,9 +26,10 @@ flowchart TD
 
     subgraph CICD["⚙️ CI/CD — GitHub Actions"]
         GH["git push\nmain"]
+        TEST["pytest\n12 tests"]
         BUILD["Docker Build\nlinux/amd64 + arm64"]
         DH["Docker Hub\nalihraza/violence-detector"]
-        GH --> BUILD --> DH
+        GH --> TEST --> BUILD --> DH
     end
 
     subgraph GITOPS["🔄 GitOps — ArgoCD"]
@@ -79,10 +80,12 @@ Both trained on the [Real Life Violence Situations Dataset](https://www.kaggle.c
 | Model storage | HuggingFace Hub | Versioned weight hosting (463 MB) |
 | REST inference API | FastAPI + Uvicorn | `/predict`, `/health`, `/metrics` endpoints |
 | Observability | Prometheus + Grafana | Latency, confidence, prediction rate dashboards |
+| Alerting | Prometheus alert rules | 5 rules: API down, model down, high latency, low confidence, no predictions |
+| Testing | pytest | 12 tests across API and model layers — gates the Docker build |
 | Containerisation | Docker (multi-platform) | `linux/amd64` + `linux/arm64` |
-| CI/CD | GitHub Actions | Auto-build & push on every relevant commit |
+| CI/CD | GitHub Actions | Tests → build → push on every relevant commit |
 | Container registry | Docker Hub | Image distribution |
-| Orchestration | Kubernetes (Docker Desktop) | Deployment + LoadBalancer service |
+| Orchestration | Kubernetes (Docker Desktop) | Deployment + LoadBalancer service + liveness/readiness probes |
 | GitOps | ArgoCD | Declarative sync from Git |
 | Auto-rollout | ArgoCD Image Updater | Zero-touch deploy on new image tag |
 
@@ -140,6 +143,18 @@ docker compose -f docker-compose.monitoring.yml up -d
 | `predictions_total` | Counter | Cumulative predictions by class |
 | `model_loaded` | Gauge | 1 when model is ready |
 
+**Alerting rules** (`monitoring/alert_rules.yml`):
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| `APIDown` | Prometheus cannot scrape `/metrics` for 1 min | Critical |
+| `ModelDown` | `model_loaded == 0` for 1 min | Critical |
+| `HighInferenceLatency` | p95 latency > 30s for 2 min | Warning |
+| `LowPredictionConfidence` | Median confidence < 60% for 5 min | Warning |
+| `NoPredictions` | Zero predictions in 10 min | Warning |
+
+View firing alerts at **http://localhost:9090/alerts**
+
 ---
 
 ## Results
@@ -165,9 +180,28 @@ Both runs tracked in MLflow — open http://localhost:5001 to compare metrics si
 
 1. **Train** — run `Dissertation_Transformers.ipynb` or `cnn.ipynb`; metrics auto-log to MLflow
 2. **Push** — `git push origin main` triggers GitHub Actions
-3. **Build** — multi-platform Docker image built; model weights pulled from HuggingFace at build time
-4. **Ship** — ArgoCD Image Updater detects new Docker Hub tag → patches `deployment.yaml` → ArgoCD syncs Kubernetes — no manual `kubectl` needed
-5. **Observe** — Prometheus scrapes `/metrics` from the running pod; Grafana shows live inference stats
+3. **Test** — pytest runs 12 tests (6 API + 6 model); Docker build is blocked if any test fails
+4. **Build** — multi-platform Docker image built; model weights pulled from HuggingFace at build time
+5. **Ship** — ArgoCD Image Updater detects new Docker Hub tag → patches `deployment.yaml` → ArgoCD syncs Kubernetes — no manual `kubectl` needed
+6. **Observe** — Prometheus scrapes `/metrics` from the running pod; Grafana shows live inference stats; alert rules fire if the model degrades
+
+---
+
+## Testing
+
+```bash
+pip install pytest httpx
+pytest tests/ -v
+```
+
+12 tests, no model weights or GPU required — heavy dependencies are mocked.
+
+| Suite | Tests | What is covered |
+|-------|------:|-----------------|
+| `test_api.py` | 6 | `/health`, `/metrics`, `/predict` success, NonViolence, missing file, short video 422 |
+| `test_model.py` | 6 | Frame tensor shape, normalisation, short video → None, valid label, argmax logic, short video inference |
+
+Tests are run automatically in CI before every Docker build — a failing test blocks the image push.
 
 ---
 
@@ -224,13 +258,18 @@ docker compose -f docker-compose.monitoring.yml up -d
 ├── preprocessed_data.dvc             # DVC-tracked dataset pointer
 ├── requirements.txt                  # Runtime dependencies
 ├── Dockerfile                        # Multi-platform image (pulls weights from HF)
-├── deployment.yaml                   # Kubernetes Deployment + Service
+├── deployment.yaml                   # Kubernetes Deployment + Service + probes
 ├── docker-compose.monitoring.yml     # Prometheus + Grafana stack
 ├── monitoring/
 │   ├── prometheus.yml                # Scrape config
+│   ├── alert_rules.yml               # 5 Prometheus alerting rules
 │   └── grafana/provisioning/         # Auto-provisioned datasource + dashboard
+├── tests/
+│   ├── conftest.py                   # Shared fixtures and mocks
+│   ├── test_api.py                   # 6 FastAPI endpoint tests
+│   └── test_model.py                 # 6 model logic tests
 └── .github/workflows/
-    └── docker-image.yml              # CI/CD pipeline
+    └── docker-image.yml              # CI/CD: test → build → push
 ```
 
 ---
