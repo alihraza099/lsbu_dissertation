@@ -5,6 +5,9 @@ on:
     branches: [ main ]
     paths:
       - 'app.py'
+      - 'api.py'
+      - 'model.py'
+      - 'start.sh'
       - 'requirements.txt'
       - 'Dockerfile'
       - '.github/workflows/docker-image.yml'
