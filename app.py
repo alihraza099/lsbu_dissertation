@@ -4,110 +4,107 @@ import cv2
 import os
 import torch
 import torch.nn as nn
-from timesformer_pytorch import TimeSformer
+from torchvision import transforms
+from transformers import TimesformerForVideoClassification
 
-# Constants
-SEQUENCE_LENGTH = 16
-IMAGE_HEIGHT, IMAGE_WIDTH = 64, 64
-CLASSES_LIST = ["Non-Violent", "Violent"]
+CLASSES = ["NonViolence", "Violence"]
+NUM_FRAMES = 8
+IMAGE_SIZE = 224
+MODEL_PATH = "best_violence_transformer.pth"
 
-# Define the Transformer model class (must match training definition)
-class TransformerClassifier(nn.Module):
-    def __init__(self, input_dim=3, num_classes=2, nhead=4, num_layers=2):
-        super().__init__()
-        self.embedding = nn.Linear(input_dim, 128)
-        encoder_layer = nn.TransformerEncoderLayer(d_model=128, nhead=nhead)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.classifier = nn.Linear(128, num_classes)
+NORM_MEAN = [0.45, 0.45, 0.45]
+NORM_STD  = [0.225, 0.225, 0.225]
+_normalize = transforms.Normalize(mean=NORM_MEAN, std=NORM_STD)
 
-    def forward(self, x):
-        x = self.embedding(x)  # [B, T, 128]
-        x = self.transformer(x)  # [B, T, 128]
-        x = x.mean(dim=1)  # Global average pool
-        return self.classifier(x)
-
+DEVICE = (
+    torch.device("mps") if torch.backends.mps.is_available()
+    else torch.device("cuda") if torch.cuda.is_available()
+    else torch.device("cpu")
+)
 
 
 @st.cache_resource
-def load_trained_model():
-    model = TimeSformer(
-        image_size=64,
-        num_frames=SEQUENCE_LENGTH,
-        num_classes=len(CLASSES_LIST),
-        dim=512,
-        depth=4,
-        heads=8,
-        patch_size=16,
-        attn_dropout=0.1,
-        ff_dropout=0.1
+def load_model():
+    model = TimesformerForVideoClassification.from_pretrained(
+        "facebook/timesformer-base-finetuned-k400",
+        ignore_mismatched_sizes=True,
     )
-    model.load_state_dict(torch.load("transformer_model.pth", map_location=torch.device('cpu')))
+    model.classifier = nn.Linear(model.config.hidden_size, len(CLASSES))
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model.to(DEVICE)
     model.eval()
     return model
 
-# Frame extraction
-def extract_frames(video_path, sequence_length, image_height, image_width):
-    frames_list = []
-    video_reader = cv2.VideoCapture(video_path)
-    video_frames_count = int(video_reader.get(cv2.CAP_PROP_FRAME_COUNT))
-    skip_frames_window = max(int(video_frames_count / sequence_length), 1)
 
-    for frame_counter in range(sequence_length):
-        video_reader.set(cv2.CAP_PROP_POS_FRAMES, frame_counter * skip_frames_window)
-        success, frame = video_reader.read()
-        if not success:
+def extract_frames(video_path: str) -> torch.Tensor | None:
+    cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total < NUM_FRAMES:
+        cap.release()
+        return None
+
+    indices = np.linspace(0, total - 1, NUM_FRAMES, dtype=int)
+    frames = []
+    for i in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(i))
+        ok, frame = cap.read()
+        if not ok:
             break
-        resized_frame = cv2.resize(frame, (image_width, image_height))
-        normalized_frame = resized_frame / 255.0
-        frames_list.append(normalized_frame)
+        frame = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), (IMAGE_SIZE, IMAGE_SIZE))
+        frames.append(frame.astype(np.float32) / 255.0)
+    cap.release()
 
-    video_reader.release()
-    return np.array(frames_list)
+    if len(frames) < NUM_FRAMES:
+        return None
 
-# PyTorch inference
-def predict_video_class(video_path, model):
-    frames = extract_frames(video_path, SEQUENCE_LENGTH, IMAGE_HEIGHT, IMAGE_WIDTH)
-    if len(frames) < SEQUENCE_LENGTH:
-        st.error("The video is too short. Please upload a longer video.")
+    clip = torch.from_numpy(np.stack(frames)).permute(0, 3, 1, 2)  # (T, 3, H, W)
+    clip = torch.stack([_normalize(f) for f in clip])               # normalise each frame
+    return clip.unsqueeze(0)                                         # (1, T, 3, H, W)
+
+
+def predict(video_path: str, model) -> tuple[str, list[float]] | tuple[None, None]:
+    clip = extract_frames(video_path)
+    if clip is None:
         return None, None
 
-    frames = torch.tensor(frames).float()                     # [T, H, W, C]
-    frames = frames.permute(0, 3, 1, 2)                        # [T, C, H, W]
-    input_tensor = frames.unsqueeze(0)                        # [1, T, C, H, W]
-
     with torch.no_grad():
-        output = model(input_tensor)
-        probs = torch.softmax(output, dim=1).cpu().numpy()[0]
-        pred_idx = np.argmax(probs)
-    return CLASSES_LIST[pred_idx], probs
+        probs = torch.softmax(
+            model(pixel_values=clip.to(DEVICE)).logits, dim=1
+        )[0].cpu().tolist()
 
-# Streamlit App
+    return CLASSES[int(np.argmax(probs))], probs
+
+
 def main():
-    st.title("Violence Detection (Transformer Model)")
-    st.write("Upload a video to classify it as **Non-Violent** or **Violent**.")
+    st.title("Violence Detection")
+    st.write("Upload a video to classify it as **NonViolence** or **Violence**.")
 
-    video_file = st.file_uploader("Upload a Video", type=["mp4", "avi", "mov", "mkv"])
+    video_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov", "mkv"])
 
     if video_file is not None:
-        temp_video_path = "temp_video.mp4"
-        with open(temp_video_path, "wb") as f:
+        temp_path = "temp_video.mp4"
+        with open(temp_path, "wb") as f:
             f.write(video_file.read())
 
-        st.video(temp_video_path)
+        st.video(temp_path)
 
-        model = load_trained_model()
+        model = load_model()
 
-        with st.spinner("Analyzing the video..."):
-            predicted_class, probabilities = predict_video_class(temp_video_path, model)
+        with st.spinner("Analysing video…"):
+            label, probs = predict(temp_path, model)
 
-        if predicted_class is not None:
-            st.success(f"Prediction: **{predicted_class}**")
-            st.write("Confidence Scores:")
-            for i, class_name in enumerate(CLASSES_LIST):
-                st.write(f"{class_name}: {probabilities[i]:.2f}")
+        if label is None:
+            st.error("Video is too short — please upload a longer clip.")
+        else:
+            colour = "red" if label == "Violence" else "green"
+            st.markdown(f"### Prediction: :{colour}[{label}]")
+            st.write("**Confidence scores:**")
+            for cls, p in zip(CLASSES, probs):
+                st.write(f"- {cls}: {p:.2%}")
 
-        if os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
 
 if __name__ == "__main__":
     main()

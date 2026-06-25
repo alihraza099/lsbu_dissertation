@@ -1,1 +1,23 @@
 venv/
+.venv/
+
+# Model weights (large binaries)
+*.pth
+*.h5
+
+# Preprocessed data and outputs
+preprocessed_data/
+output_videos/
+
+# Generated artifacts
+*.png
+confusion_matrix.png
+training_curves.png
+transformer_confusion_matrix.png
+transformer_training_curves.png
+
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
