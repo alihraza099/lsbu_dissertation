@@ -1,11 +1,7 @@
-import os
+import requests
 import streamlit as st
-from model import CLASSES, load_model, run_inference
 
-
-@st.cache_resource
-def get_model():
-    return load_model()
+API_URL = "http://localhost:8000/predict"
 
 
 def main():
@@ -15,28 +11,29 @@ def main():
     video_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov", "mkv"])
 
     if video_file is not None:
-        temp_path = "temp_video.mp4"
-        with open(temp_path, "wb") as f:
-            f.write(video_file.read())
-
-        st.video(temp_path)
-
-        model = get_model()
+        st.video(video_file)
 
         with st.spinner("Analysing video…"):
-            label, probs = run_inference(temp_path, model)
+            response = requests.post(
+                API_URL,
+                files={"file": (video_file.name, video_file.getvalue(), "video/mp4")},
+                timeout=120,
+            )
 
-        if label is None:
+        if response.status_code == 422:
             st.error("Video is too short — please upload a longer clip.")
+        elif response.status_code != 200:
+            st.error(f"Inference failed: {response.text}")
         else:
+            result = response.json()
+            label = result["prediction"]
             colour = "red" if label == "Violence" else "green"
             st.markdown(f"### Prediction: :{colour}[{label}]")
+            st.write(f"**Confidence:** {result['confidence']:.2%}")
             st.write("**Confidence scores:**")
-            for cls, p in zip(CLASSES, probs):
+            for cls, p in result["probabilities"].items():
                 st.write(f"- {cls}: {p:.2%}")
-
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+            st.caption(f"Inference latency: {result['latency_seconds']:.2f}s")
 
 
 if __name__ == "__main__":
