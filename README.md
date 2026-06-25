@@ -6,7 +6,7 @@
 [![MLflow](https://img.shields.io/badge/Experiment_Tracking-MLflow-blue)](http://localhost:5001)
 [![Kubernetes](https://img.shields.io/badge/Deployed_on-Kubernetes-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 
-Real-time binary video classification (Violence / NonViolence) with a full end-to-end MLOps pipeline — from experiment tracking and model versioning to automated GitOps deployment on Kubernetes.
+Real-time binary video classification (Violence / NonViolence) with a full end-to-end MLOps pipeline — experiment tracking, REST inference API, live observability, GitOps deployment, and reproducible data versioning.
 
 ---
 
@@ -17,9 +17,11 @@ flowchart TD
     subgraph DEV["🧪 Development"]
         NB["Jupyter Notebooks\n(CNN · TimeSformer)"]
         MLF["MLflow\nExperiment Tracking"]
-        HF["HuggingFace Hub\nModel Registry"]
+        HF["HuggingFace Hub\nModel Weights"]
+        DVC["DVC\nData Versioning"]
         NB -->|log metrics & params| MLF
         NB -->|push weights| HF
+        NB -->|track dataset hash| DVC
     end
 
     subgraph CICD["⚙️ CI/CD — GitHub Actions"]
@@ -38,9 +40,17 @@ flowchart TD
 
     subgraph K8S["☸️ Kubernetes — Docker Desktop"]
         DEP["Deployment\n(violence-detector)"]
-        SVC["LoadBalancer\nService :80"]
-        APP["Streamlit App\n:8501"]
-        ARGO --> DEP --> SVC --> APP
+        UI["Streamlit UI\n:80"]
+        API["FastAPI\n:8000"]
+        ARGO --> DEP
+        DEP --> UI
+        DEP --> API
+    end
+
+    subgraph OBS["📊 Observability"]
+        PROM["Prometheus\n:9090"]
+        GRAF["Grafana\n:3000"]
+        API -->|/metrics| PROM --> GRAF
     end
 
     NB --> GH
@@ -64,14 +74,71 @@ Both trained on the [Real Life Violence Situations Dataset](https://www.kaggle.c
 
 | Layer | Tool | Purpose |
 |-------|------|---------|
-| Experiment tracking | MLflow 2.17.2 | Metrics, params, model lineage |
+| Experiment tracking | MLflow 2.17.2 | Metrics, params, model lineage across runs |
+| Data versioning | DVC | Dataset hash locked in Git — fully reproducible |
 | Model storage | HuggingFace Hub | Versioned weight hosting (463 MB) |
+| REST inference API | FastAPI + Uvicorn | `/predict`, `/health`, `/metrics` endpoints |
+| Observability | Prometheus + Grafana | Latency, confidence, prediction rate dashboards |
 | Containerisation | Docker (multi-platform) | `linux/amd64` + `linux/arm64` |
-| CI/CD | GitHub Actions | Auto-build & push on every commit |
+| CI/CD | GitHub Actions | Auto-build & push on every relevant commit |
 | Container registry | Docker Hub | Image distribution |
 | Orchestration | Kubernetes (Docker Desktop) | Deployment + LoadBalancer service |
 | GitOps | ArgoCD | Declarative sync from Git |
 | Auto-rollout | ArgoCD Image Updater | Zero-touch deploy on new image tag |
+
+---
+
+## REST API
+
+The FastAPI endpoint runs on port 8000 alongside the Streamlit UI.
+
+### Predict
+```bash
+curl -X POST http://localhost:8000/predict \
+  -F "file=@video.mp4"
+```
+```json
+{
+  "prediction": "Violence",
+  "confidence": 0.9998,
+  "probabilities": { "NonViolence": 0.0002, "Violence": 0.9998 },
+  "latency_seconds": 4.2
+}
+```
+
+### Other endpoints
+```bash
+curl http://localhost:8000/health   # liveness probe
+curl http://localhost:8000/metrics  # Prometheus scrape
+```
+
+Interactive docs: **http://localhost:8000/docs**
+
+---
+
+## Observability
+
+Prometheus scrapes `/metrics` every 15 seconds. The Grafana dashboard is pre-provisioned on first boot.
+
+```bash
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| Prometheus | http://localhost:9090 | — |
+| Grafana | http://localhost:3000 | admin / admin |
+
+**Dashboard panels:** Model Status · Total Predictions · P95 Latency · Avg Confidence · Prediction Rate by Class · Latency Percentiles (p50/p95/p99) · Confidence over Time · Violence/NonViolence ratio
+
+**Key metrics exposed:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `inference_latency_seconds` | Histogram | End-to-end request latency |
+| `prediction_confidence` | Histogram | Confidence score by predicted class |
+| `predictions_total` | Counter | Cumulative predictions by class |
+| `model_loaded` | Gauge | 1 when model is ready |
 
 ---
 
@@ -90,6 +157,8 @@ Both trained on the [Real Life Violence Situations Dataset](https://www.kaggle.c
 |--------|:-----------:|-----------|
 | 24 / 50 | **98.17%** | Patience 10 |
 
+Both runs tracked in MLflow — open http://localhost:5001 to compare metrics side-by-side.
+
 ---
 
 ## Deployment Flow
@@ -98,39 +167,45 @@ Both trained on the [Real Life Violence Situations Dataset](https://www.kaggle.c
 2. **Push** — `git push origin main` triggers GitHub Actions
 3. **Build** — multi-platform Docker image built; model weights pulled from HuggingFace at build time
 4. **Ship** — ArgoCD Image Updater detects new Docker Hub tag → patches `deployment.yaml` → ArgoCD syncs Kubernetes — no manual `kubectl` needed
+5. **Observe** — Prometheus scrapes `/metrics` from the running pod; Grafana shows live inference stats
 
 ---
 
 ## Quick Start
 
 ### Run locally
-
 ```bash
 git clone https://github.com/alihraza099/lsbu_dissertation.git
 cd lsbu_dissertation
 pip install -r requirements.txt
+# Streamlit UI
 streamlit run app.py
+# FastAPI (separate terminal)
+uvicorn api:app --port 8000
 ```
 
 ### Run via Docker
-
 ```bash
-docker run -p 8501:8501 alihraza/violence-detector:latest
-# open http://localhost:8501
+docker run -p 8501:8501 -p 8000:8000 alihraza/violence-detector:latest
+# Streamlit → http://localhost:8501
+# FastAPI   → http://localhost:8000/docs
 ```
 
-### Start MLflow (Docker)
-
+### Start MLflow
 ```bash
 docker run -d --name mlflow-server \
-  -p 5001:5000 \
-  -v mlflow-data:/mlflow \
+  -p 5001:5000 -v mlflow-data:/mlflow \
   ghcr.io/mlflow/mlflow:v2.17.2 \
-  mlflow server \
-    --host=0.0.0.0 --port=5000 \
+  mlflow server --host=0.0.0.0 --port=5000 \
     --backend-store-uri=sqlite:///mlflow/mlflow.db \
     --default-artifact-root=/mlflow/artifacts
 # open http://localhost:5001
+```
+
+### Start Prometheus + Grafana
+```bash
+docker compose -f docker-compose.monitoring.yml up -d
+# Grafana → http://localhost:3000  (admin / admin)
 ```
 
 ---
@@ -139,15 +214,23 @@ docker run -d --name mlflow-server \
 
 ```
 .
-├── app.py                          # Streamlit inference app (TimeSformer)
-├── Dissertation_Transformers.ipynb # TimeSformer training + MLflow logging
-├── cnn.ipynb                       # ResNet-18 CNN training + MLflow logging
-├── video_preprocessing.ipynb       # Frame extraction & dataset preparation
-├── requirements.txt                # Runtime dependencies
-├── Dockerfile                      # Multi-platform image (pulls weights from HF)
-├── deployment.yaml                 # Kubernetes Deployment + Service
+├── app.py                            # Streamlit inference UI
+├── api.py                            # FastAPI REST endpoint + Prometheus metrics
+├── model.py                          # Shared inference logic (used by both)
+├── start.sh                          # Container entrypoint (uvicorn + streamlit)
+├── Dissertation_Transformers.ipynb   # TimeSformer training + MLflow logging
+├── cnn.ipynb                         # ResNet-18 CNN training + MLflow logging
+├── video_preprocessing.ipynb         # Frame extraction & dataset preparation
+├── preprocessed_data.dvc             # DVC-tracked dataset pointer
+├── requirements.txt                  # Runtime dependencies
+├── Dockerfile                        # Multi-platform image (pulls weights from HF)
+├── deployment.yaml                   # Kubernetes Deployment + Service
+├── docker-compose.monitoring.yml     # Prometheus + Grafana stack
+├── monitoring/
+│   ├── prometheus.yml                # Scrape config
+│   └── grafana/provisioning/         # Auto-provisioned datasource + dashboard
 └── .github/workflows/
-    └── docker-image.yml            # CI/CD pipeline
+    └── docker-image.yml              # CI/CD pipeline
 ```
 
 ---
