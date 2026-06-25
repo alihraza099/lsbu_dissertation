@@ -1,0 +1,53 @@
+groups:
+  - name: violence-detector
+    rules:
+
+      # Model is down or not loaded
+      - alert: ModelDown
+        expr: model_loaded == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Violence detector model is not loaded"
+          description: "The model has been unloaded or failed to initialise for more than 1 minute."
+
+      # No predictions in last 10 minutes (app may be stuck)
+      - alert: NoPredictions
+        expr: rate(predictions_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No predictions made in the last 10 minutes"
+          description: "The API has received no prediction requests for 10 minutes — may indicate the UI or API is unreachable."
+
+      # 95th percentile inference latency exceeds 30 seconds
+      - alert: HighInferenceLatency
+        expr: histogram_quantile(0.95, rate(inference_latency_seconds_bucket[5m])) > 30
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference latency is too high"
+          description: "95th percentile latency is above 30s for the last 2 minutes — model may be overloaded."
+
+      # Low confidence predictions — model may be drifting
+      - alert: LowPredictionConfidence
+        expr: histogram_quantile(0.50, rate(prediction_confidence_bucket[10m])) < 0.6
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model confidence is consistently low"
+          description: "Median prediction confidence has dropped below 60% — possible data drift or model degradation."
+
+      # FastAPI is unreachable (Prometheus cannot scrape /metrics)
+      - alert: APIDown
+        expr: up{job="violence-detector"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Violence detector API is down"
+          description: "Prometheus cannot reach the /metrics endpoint — FastAPI may have crashed."
