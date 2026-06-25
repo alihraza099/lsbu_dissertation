@@ -21,3 +21,4 @@ transformer_training_curves.png
 
 # Jupyter
 .ipynb_checkpoints/
+/preprocessed_data

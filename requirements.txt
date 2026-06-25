@@ -5,3 +5,7 @@ opencv-python-headless
 transformers
 numpy
 accelerate
+fastapi
+uvicorn[standard]
+prometheus-client
+python-multipart
