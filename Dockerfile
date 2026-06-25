@@ -22,6 +22,10 @@ RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 # Copy app files
 COPY . .
 
+# Download model weights from HuggingFace Hub
+RUN pip install --no-cache-dir huggingface_hub && \
+    python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='alihraza/violence-detector', filename='best_violence_transformer.pth', local_dir='.')"
+
 #  Expose Streamlit's default port
 EXPOSE 8501
 
